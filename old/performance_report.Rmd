@@ -1,0 +1,402 @@
+---
+title: "Performance Evaluation"
+author: "Christopher Silva de Pádua"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true 
+    self_contained: yes
+    css: "/home/christopher/Documents/Juridico/aijus-data-science/reports/aijus_automated/corp-styles.css"
+    highlight: pygments
+# theme: cerulian
+params:
+  path: "~/Downloads/Performance/"
+---
+
+<img id="logo" src="/home/christopher/Documents/Juridico/aijus-data-science/reports/aijus_automated/images/semantix.png" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, results='asis')
+```
+
+<!-- Importing Libraries -->
+```{r}
+library(jsonlite)
+library(caret)
+library(dplyr)
+library(pROC)
+library(PRROC)
+library(ggplot2)
+library(knitr)
+library(reshape2)
+library(data.table)
+library(scales)
+library(kableExtra)
+library(captioner)
+
+options(scipen = 10, knitr.table.format = "html", knitr.kable.NA = '--')
+```
+
+<!-- Read files from the newest folder -->
+```{r}
+path = params$path
+performanceFolder = dir(path)
+
+folder = paste0(path, performanceFolder)
+
+lastPerformanceMeasure = folder %>% 
+  file.info() %>% 
+  subset(subset = ctime == max(ctime)) %>% 
+  rownames()
+
+setwd(lastPerformanceMeasure)
+
+models = lapply(list.files(), function(file) fromJSON(file))
+```
+
+<!-- Costumize tables theme -->
+```{r}
+myTableSchema = function(df){
+  df %>% 
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+      full_width = F,
+      position = "left") %>% 
+    column_spec(1, bold = T)
+}
+```
+
+<!-- Structure report form classification methods -->
+```{r}
+classificationMetrics = function(df){
+  dataSet = as.data.table(df)
+  label = unique(dataSet$target)
+  positive_label = label[1]
+  negative_label = label[2]
+  
+  cm = with(dataSet, confusionMatrix(data = predicted, reference = target, positive = positive_label))
+  
+  overall = 100*round(cm$overall,4)
+  accuracy = cm$overall[4]
+  error = 1 - accuracy
+  
+  dfCM = as.data.frame(cm$table)
+  dfCM = dcast(dfCM, Prediction ~ Reference, value.var = "Freq")
+
+  if(nrow(cm$table) == 2){
+    
+    cm_negative = with(dataSet, confusionMatrix(data = predicted, reference = target, positive = negative_label))
+    dtClass = data.table(cm$byClass, cm_negative$byClass)
+    dtClass = 100*round(dtClass,4)
+    
+    dtClass[, Measures := names(cm$byClass)]
+    setcolorder(dtClass, c("Measures", "V1", "V2"))
+    names(dtClass) = c("Measures",
+                       paste0("Class: ", positive_label),
+                       paste0("Class: ", negative_label))
+    
+  } else {
+    dtClass = as.data.table(
+      100*round(t(cm$byClass),4),
+      keep.rownames = "Measures")
+  }
+  
+  names(dtClass)[2:ncol(dtClass)] = paste0(names(dtClass)[2:ncol(dtClass)]," (%)")
+
+  cat("\n###Confusion Matrix\n")
+  kable(dfCM) %>% 
+    myTableSchema() %>% 
+    print()
+  cat('\n')
+
+  cat("\n###Overall Statistics\n")
+
+  if(nrow(cm$table) == 2){
+    roc = with(dataSet, roc(target, probability))
+    best_threshold = coords(roc, "best", ret = "threshold")
+    
+    pr_positive = pr.curve(scores.class0 = dataSet[target == positive_label]$probability,
+                           scores.class1 = dataSet[target == negative_label]$probability,
+                           curve = TRUE,
+                           max.compute = T,
+                           min.compute = T,
+                           rand.compute = T)
+    
+    pr_negative = pr.curve(scores.class0 = 1 - dataSet[target == negative_label]$probability,
+                           scores.class1 = 1 - dataSet[target == positive_label]$probability,
+                           curve = TRUE, max.compute = T,
+                           min.compute = T,
+                           rand.compute = T)
+    
+    dtOverall = data.table(
+      Measures = c(
+        "Accuracy",
+        "95% CI",
+        "No Information Rate",
+        "P-Value [Acc > NIR]",
+        "Kappa", 
+        "Mcnemar's Test P-Value",
+        "AUC ROC Curve", 
+        "Optimal Probability Threshold",
+        paste0("AUC PR Curve ", positive_label),
+        paste0("Lift AUC PR Curve ", positive_label),
+        paste0("AUC PR Curve ", negative_label),
+        paste0("Lift AUC PR Curve ", negative_label)
+        ),
+      Values = c(
+        overall[1],
+        paste0("[",overall[3], " ; ", overall[4], "]"),
+        overall[5],
+        overall[6], 
+        overall[2],
+        overall[7],
+        roc$auc,
+        100*round(best_threshold,4),
+        100*round(pr_positive$auc.davis.goadrich, 4),
+        100*round((pr_positive$auc.davis.goadrich/pr_positive$rand$auc.davis.goadrich) - 1, 4),
+        100*round(pr_negative$auc.davis.goadrich, 4), 
+        100*round((pr_negative$auc.davis.goadrich/pr_negative$rand$auc.davis.goadrich) - 1,4)
+        )
+      )
+  } else {
+    
+    roc = with(dataSet, multiclass.roc(target, probability))
+    
+    dtOverall = data.table(
+      Measures = c(
+        "Accuracy",
+        "95% CI",
+        "No Information Rate",
+        "P-Value [Acc > NIR]",
+        "Kappa",
+        "Mcnemar's Test P-Value",
+        "AUC ROC Curve"
+        ),
+      Values = c(
+        overall[1],
+        paste0("[",overall[3], " ; ", overall[4], "]"), 
+        overall[5], 
+        overall[6], 
+        overall[2],
+        overall[7], 
+        100*round(roc$auc,4)
+        )
+      )
+  }
+
+  kable(dtOverall,
+        col.names = c("Measures","Values (%)")) %>%
+    myTableSchema() %>%
+    print()
+  cat("\n")
+
+  plot(roc,main="ROC Curve")
+  cat("\n")
+
+  plot(pr_positive,main=paste0("PR Curve: ", positive_label))
+  cat("\n")
+  
+  plot(pr_negative,main=paste0("PR Curve: ", negative_label))
+  cat("\n")
+  
+  ggROC = ggplot(dataSet, aes(x = probability, fill = predicted, colour = predicted)) + 
+    geom_density(alpha = 0.7) + 
+    geom_vline(xintercept = best_threshold, colour = "black", linetype = "dashed") + 
+    annotate("text", x = best_threshold, y = 0, label = "Best Threshold") + 
+    scale_fill_brewer(palette = "Set1", name = "Predicted Label") + 
+    scale_colour_brewer(palette = "Set1", name = "Predicted Label") + 
+    scale_x_continuous(labels=percent) + 
+    theme_bw() + 
+    theme(panel.grid = element_blank()) + 
+    xlab("Probability") + 
+    ylab("Density") +
+    ggtitle("Classes Separability")
+ 
+  print(ggROC)
+  cat("\n")
+
+  cat("\n###Statistics by Class\n")
+  kable(dtClass) %>% 
+    myTableSchema() %>% 
+    print()
+  cat("\n")
+  
+  return(error)
+}
+```
+
+<!-- Define functions to calculate errors for regression -->
+```{r}
+MSE = function(pred, obs, residuals = NULL){
+  if(is.null(residuals)){
+    error = pred - obs
+  } else {
+    error = residuals
+  }
+  
+  mse = mean(error^2)
+  return(mse)
+}
+SAE = function(pred, obs, residuals = NULL){
+  if(is.null(residuals)){
+    error = pred - obs
+  } else {
+    error = residuals
+  }
+  
+  sae = sum(abs(error))
+  return(sae)
+}
+SSE = function(pred, obs, residuals = NULL){
+  if(is.null(residuals)){
+    error = pred - obs
+  } else {
+    error = residuals
+  }
+  
+  sse = sum(error^2)
+  return(sse)
+}
+```
+
+<!-- Creates linear model expression to display in ggplot -->
+```{r}
+equation = function(x) {
+  lm_coef <- list(a = round(coef(x)[1], digits = 2),
+                  b = round(coef(x)[2], digits = 2),
+                  r2adj = 100*round(summary(x)$adj.r.squared, digits = 4));
+  lm_eq <- substitute(hat(Y) == a + b %.% italic(X)*";"~~italic(R)[adj]^2~"="~r2adj~"%",lm_coef)
+  as.character(as.expression(lm_eq));                 
+}
+```
+
+<!-- Structure report form regression methods -->
+```{r}
+regressionMetrics = function(dataSet){
+  cat("###Plot analisys of predicted values\n")
+ 
+  model = lm(target ~ predicted, data = dataSet)
+  summaryModel = summary(model)
+  
+  residual = summaryModel$residuals
+  intercept = summaryModel$coefficients[1]
+  slope = summaryModel$coefficients[2]
+  r2adj = summaryModel$adj.r.squared
+  fstat = summaryModel$fstatistic
+  
+  xNote = (min(dataSet$predicted) + max(dataSet$predicted))/2
+  yNote = max(dataSet$target)
+  
+  gg = ggplot(dataSet, aes(x = predicted, y= target)) + 
+    geom_point() + 
+    geom_smooth(method = "lm", aes(colour = "Adjusted Line")) + 
+    geom_abline(intercept = 0, slope = 1, aes(colour = "Referrence Line")) + 
+    annotate("text", x = xNote, y = yNote, label = equation(model), parse = T) +
+    coord_fixed() + 
+    scale_colour_manual(name = "", values = c("blue","red")) + 
+    theme_bw() + 
+    theme(
+      panel.border = element_blank(),
+      panel.grid = element_blank(), 
+      axis.line = element_line(colour = "black"), 
+      legend.background = element_rect()
+      ) +
+    xlab("Predicted") +
+    ylab("Target") +
+    ggtitle("Predictet x Observed Plot")
+
+  cat("\n")
+  print(gg)
+  cat("\n")
+  
+  cat("\n")
+  par(mfrow = c(2,2))
+  plot(model)
+  par(mfrow = c(1,1))
+  cat("\n")
+  cat("\n")
+  
+  cat("###Overall Statistics\n")
+  error = with(dataSet, target - predicted)
+  sae = with(dataSet, SAE(pred = predicted, obs = target))
+  mae = with(dataSet, MAE(pred = predicted, obs = target))
+  sse = with(dataSet, SSE(pred = predicted, obs = target))
+  mse = with(dataSet, MSE(pred = predicted, obs = target))
+  rmse = with(dataSet, RMSE(pred = predicted, obs = target))
+  
+  correlation = cor(dataSet$target, dataSet$predicted)
+
+  metrics = data.table(
+    Measures = c(
+      "SAE",
+      "MAE",
+      "SSE",
+      "MSE",
+      "RMSE",
+      "Correlation",
+      "Slope",
+      "R² Adj",
+      "P-Value of F-Statistic"),
+    Values = c(
+      round(sae,2),
+      round(mae,2),
+      round(sse,2),
+      round(mse,2),
+      round(rmse,2),
+      100*round(correlation,4),
+      round(slope,2),
+      round(r2adj,2),
+      100*round(1 - pf(q = fstat[1], df1 = fstat[2], df2 = fstat[3]),4)
+      )
+    )
+  cat("\n")
+  kable(metrics) %>% 
+    myTableSchema() %>% 
+    print()
+  cat("\n")
+  
+  return(rmse)
+}
+```
+
+<!-- Constructor for report -->
+```{r}
+report = function(model){
+  cat("#",model$id,"\n")
+  cat("__Problem:__\t",model$type,"\n\n")
+  cat("__Method:__\t",model$method,"\n\n")
+  
+  if(model$type == "Classification"){
+    cat("##In-Sample Measures\n")
+    errorTrainingSet = classificationMetrics(model$trainingSet)
+
+    cat("##Out-of-Sample Measures\n")
+    errorTestSet = classificationMetrics(model$testSet)
+
+  } else {
+    cat("##In-Sample Measures\n")
+    errorTrainingSet = regressionMetrics(model$trainingSet)
+    
+    cat("##Out-of-Sample Measures\n")
+    errorTestSet = regressionMetrics(model$testSet)
+  }
+  
+  cat("##Generalization Measures\n")
+  distinctiveness = abs(errorTrainingSet - errorTestSet)
+  generalization = 100*(1 - round(distinctiveness,4))
+
+  cat("__Distinctiveness:__ &nbsp;", distinctiveness, "\n")
+  cat("\n__Generalization:__ &nbsp;", generalization, "%\n",sep="")
+  cat("\n")
+}
+```
+
+<!-- Calls report method for each model and appends then -->
+```{r}
+out = lapply(models, report)
+```
+
+
